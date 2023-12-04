@@ -1,3 +1,4 @@
 *.env
 *.db
 config.txt
+*.venv
