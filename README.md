@@ -5,6 +5,7 @@ This bot is connected to my personal digital ocean droplet. Just update the `.en
 
 # Personal notes
 
+python3 -m venv ./venv
 source .venv/bin/activate  
 pip3 install -r ./requirements.txt (not needed if already installed)  
 nohup python3 app.py &  
