@@ -5,7 +5,7 @@ A personal discord bot for journal entries
 
 This bot is connected to my personal digital ocean droplet. Just update the `.env-example` to `.env` and call `python3 app.py`
 
-# Personal notes
+# Personal notes (setup)
 
 python3 -m venv ./venv  
 source .venv/bin/activate  
