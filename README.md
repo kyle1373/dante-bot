@@ -1,5 +1,5 @@
 # Dante Bot
-![image](https://github.com/kyle1373/dante-bot/assets/59634395/a81b14d9-9319-454f-9a3b-aff1be57f9a6)
+<img width="493" alt="image" src="https://github.com/kyle1373/dante-bot/assets/59634395/e5f32064-33d6-4f99-afe8-5bf15e754582">
 
 A personal discord bot for journal entries
 
