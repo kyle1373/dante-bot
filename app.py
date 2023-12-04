@@ -31,11 +31,12 @@ with conn:
                         submission_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )''')
     conn.execute('''CREATE TABLE IF NOT EXISTS streaks (
-                        user_id TEXT PRIMARY KEY,
+                        user_id TEXT NOT NULL,
                         server_id TEXT NOT NULL,
                         current_streak INTEGER DEFAULT 0,
                         highest_streak INTEGER DEFAULT 0,
-                        last_submission_date TIMESTAMP
+                        last_submission_date TIMESTAMP,
+                        PRIMARY KEY (user_id, server_id)
                     )''')
 
 # Helper functions
@@ -121,14 +122,14 @@ async def on_command_error(ctx, error):
 async def help_command(ctx):
     help_text = (
         "!submit [message]: Submit a daily journal entry.\n"
-        "!history [number]: View your last [number] journal entries.\n"
+        "!journals [number]: View your last [number] journal entries.\n"
         "!removelatest: Remove your latest journal entry.\n"
         "!streak: View your current and highest streak achieved.\n"
-        "!help: Shows this help message."
+        "!setreminder [time]: Set the daily reminder time (e.g., '8:30PM'). Requires admin permissions.\n"
     )
     await ctx.send(help_text)
 
-@bot.command(name='history')
+@bot.command(name='journals')
 async def history(ctx, number: str = None):
     if number is None or not number.isdigit():
         number = 10
@@ -144,16 +145,17 @@ async def history(ctx, number: str = None):
 
     if entries:
         for entry in entries:
-            # Convert the submission time to Los Angeles timezone
-            utc_submission_time = datetime.fromisoformat(entry[1])
-            la_submission_time = utc_submission_time.astimezone(pacific_time)
+            # Use the submission time directly as it's already a datetime object
+            la_submission_time = entry[1].astimezone(pacific_time) if entry[1] else None
 
             embed = discord.Embed(description=entry[0], color=0x3498db)
             embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.avatar.url if ctx.author.avatar else discord.Embed.Empty)
-            embed.set_footer(text=la_submission_time.strftime("%A, %B %d %Y at %I:%M%p"))
+            if la_submission_time:
+                embed.set_footer(text=la_submission_time.strftime("%A, %B %d %Y at %I:%M%p"))
             await ctx.send(embed=embed)
     else:
         await ctx.send("You have no journal entries.")
+
 
 
 @bot.command(name='streak')
@@ -194,7 +196,6 @@ async def submit(ctx, *, arg=None):
         await ctx.send("Please provide a journal entry to submit.")
         return
 
-    print("Sending daily journal")
     user_id = str(ctx.author.id)
     server_id = str(ctx.guild.id)
     channel_id = str(ctx.channel.id)
@@ -236,7 +237,7 @@ async def set_reminder(ctx, time_str: str):
     # Write the time to a file or store it in some other way
     with open('config.txt', 'w') as file:
         file.write(f'{hour}:{minute}')
-    await ctx.send(f'Reminder time set to {hour:02d}:{minute:02d} PDT.')
+    await ctx.send(f'Homies reminder time set to {hour:02d}:{minute:02d} PDT.')
 
     # Restart the daily_check loop to update the time
     daily_check.restart()
@@ -266,6 +267,8 @@ async def daily_check():
         mentions = ' '.join([f'<@{user_id}>' for user_id in users_to_remind])
         reminder_message = f"{mentions}\nMake sure you submit your journal entry before the end of the day!"
         await channel.send(reminder_message)
+        print("Sent reminder message!")
+        print(reminder_message + "\n" + str(datetime.now(pytz.timezone('America/Los_Angeles'))) + "\n\n")
 
 @daily_check.before_loop
 async def before_daily_check():
