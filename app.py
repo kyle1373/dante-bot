@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, time
 from discord.ext import commands, tasks
 import os
 import asyncio
+import re
+
 from dotenv import load_dotenv
 
 load_dotenv()  # take environment variables from .env.
@@ -35,7 +37,8 @@ with conn:
                         highest_streak INTEGER DEFAULT 0,
                         last_submission_date TIMESTAMP
                     )''')
-    
+
+# Helper functions
 def read_reminder_time():
     try:
         with open('config.txt', 'r') as file:
@@ -45,8 +48,10 @@ def read_reminder_time():
     except FileNotFoundError:
         return 20, 0  # Default time if file not found
 
-async def get_users_without_submission(server_id, date):
-    users_with_submission = {row[0] for row in conn.execute('SELECT DISTINCT user_id FROM journals WHERE server_id = ? AND DATE(submission_time) = ?', (server_id, date))}
+async def get_users_without_submission(server_id, date, reminder_time):
+    start_of_day = datetime.combine(date, time.min).astimezone(pytz.timezone('America/Los_Angeles'))
+    end_of_day = reminder_time.astimezone(pytz.timezone('America/Los_Angeles'))
+    users_with_submission = {row[0] for row in conn.execute('SELECT DISTINCT user_id FROM journals WHERE server_id = ? AND submission_time BETWEEN ? AND ?', (server_id, start_of_day, end_of_day))}
     all_members = {member.id for member in bot.get_guild(server_id).members if not member.bot}
     return all_members - users_with_submission
 
@@ -99,7 +104,10 @@ def update_streak(user_id, server_id):
 @bot.event
 async def on_ready():
     print(f'{bot.user.name} has connected to Discord!')
+    daily_check.start()
+    print("Started reminder async")
     print(f'Commands: {[command.name for command in bot.commands]}')
+
 
 @bot.event
 async def on_command_error(ctx, error):
@@ -203,17 +211,46 @@ async def submit(ctx, *, arg=None):
         await ctx.send(f"Thank you for sending your journal entry, {ctx.author.display_name}. You've already submitted one today, so your streak still stands at {new_streak}.")
 
 @bot.command(name='setreminder')
-@commands.has_permissions(administrator=True)  # Ensure only admins can set the reminder time
-async def set_reminder(ctx, hour: int, minute: int):
+@commands.has_permissions(administrator=True)  # Ensure only admins can use this command
+async def set_reminder(ctx, time_str: str):
+    # Regular expression to parse the time input
+    match = re.match(r'(\d{1,2}):(\d{2})([APM]{2})', time_str.upper())
+    if not match:
+        await ctx.send("Invalid time format. Please use a format like '8:30PM' or '10:00AM'.")
+        return
+
+    hour, minute, meridiem = match.groups()
+    hour, minute = int(hour), int(minute)
+
+    # Convert 12-hour time to 24-hour time
+    if meridiem == 'AM' and hour == 12:
+        hour = 0
+    elif meridiem == 'PM' and hour != 12:
+        hour += 12
+
+    # Validate time
+    if not (0 <= hour < 24 and 0 <= minute < 60):
+        await ctx.send("Invalid time. Please enter a valid time.")
+        return
+
+    # Write the time to a file or store it in some other way
     with open('config.txt', 'w') as file:
         file.write(f'{hour}:{minute}')
     await ctx.send(f'Reminder time set to {hour:02d}:{minute:02d} PDT.')
 
     # Restart the daily_check loop to update the time
     daily_check.restart()
-        
+
+# Scheduled tasks
 @tasks.loop(hours=24)
 async def daily_check():
+    hour, minute = read_reminder_time()
+    now = datetime.now(pytz.timezone('America/Los_Angeles'))
+    reminder_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    if now < reminder_time:
+        await asyncio.sleep((reminder_time - now).total_seconds())
+
     server_id = 816083336836939776  # Server to check
     channel_id = 902831374506020874  # Channel to send message
     channel = bot.get_channel(channel_id)
@@ -221,17 +258,9 @@ async def daily_check():
     if channel is None:
         print("Channel not found")
         return
-    
-    hour, minute = read_reminder_time()
-    now = datetime.now(pytz.timezone('America/Los_Angeles'))
-    reminder_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-    if now < reminder_time:
-        # Wait until the reminder time
-        await asyncio.sleep((reminder_time - now).total_seconds())
-
-    date_to_check = (datetime.now(pytz.timezone('America/Los_Angeles')) - timedelta(hours=20)).date()
-    users_to_remind = await get_users_without_submission(server_id, date_to_check)
+    date_to_check = now.date()
+    users_to_remind = await get_users_without_submission(server_id, date_to_check, reminder_time)
 
     if users_to_remind:
         mentions = ' '.join([f'<@{user_id}>' for user_id in users_to_remind])
@@ -246,11 +275,10 @@ async def before_daily_check():
     first_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
     if now >= first_run:
-        first_run += timedelta(days=1)  # Schedule for the next day if time has passed
+        first_run += timedelta(days=1)
 
     await asyncio.sleep((first_run - now).total_seconds())
 
-daily_check.start()
-
+# Bot token and run
 bot_token = os.getenv('DISCORD_BOT_TOKEN')
 bot.run(bot_token)
