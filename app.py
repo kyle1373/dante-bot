@@ -49,11 +49,25 @@ def read_reminder_time():
     except FileNotFoundError:
         return 20, 0  # Default time if file not found
 
-async def get_users_without_submission(server_id, date, reminder_time):
-    start_of_day = datetime.combine(date, time.min).astimezone(pytz.timezone('America/Los_Angeles'))
-    end_of_day = reminder_time.astimezone(pytz.timezone('America/Los_Angeles'))
-    users_with_submission = {row[0] for row in conn.execute('SELECT DISTINCT user_id FROM journals WHERE server_id = ? AND submission_time BETWEEN ? AND ?', (server_id, start_of_day, end_of_day))}
+async def get_users_without_submission(server_id, date):
+    pacific_time = pytz.timezone('America/Los_Angeles')
+    utc_time = pytz.utc
+
+    # Start and end of the day in Pacific Time
+    start_of_day_pacific = datetime.combine(date, time.min).astimezone(pacific_time)
+    end_of_day_pacific = datetime.combine(date, time.max).astimezone(pacific_time)
+
+    # Convert to UTC for comparison with database entries
+    start_of_day_utc = start_of_day_pacific.astimezone(utc_time)
+    end_of_day_utc = end_of_day_pacific.astimezone(utc_time)
+
+    # Get users with submission in the given date range
+    users_with_submission = {row[0] for row in conn.execute('SELECT DISTINCT user_id FROM journals WHERE server_id = ? AND submission_time BETWEEN ? AND ?', (server_id, start_of_day_utc, end_of_day_utc))}
+    
+    # Get all non-bot members of the server
     all_members = {member.id for member in bot.get_guild(server_id).members if not member.bot}
+    
+    # Return users who haven't submitted
     return all_members - users_with_submission
 
 # Database functions
