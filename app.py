@@ -301,6 +301,7 @@ async def export(ctx):
 
 @tasks.loop(minutes=1)
 async def check_reminders():
+    print("Checking reminders...")
     now = datetime.now(pytz.timezone('America/Los_Angeles'))
     current_time = now.strftime("%H:%M:00")  # Format to match the time stored in the database
     start_of_day_pacific = datetime.combine(now.date(), time.min).astimezone(pytz.timezone('America/Los_Angeles'))
@@ -313,6 +314,8 @@ async def check_reminders():
     with conn:
         # Fetch all reminders that match the current time
         reminders = conn.execute('SELECT user_id, server_id FROM reminders WHERE reminder_time = ?', (current_time,)).fetchall()
+    
+    print("Reminders at " + str(now) + ": " + str(reminders))    
 
     for reminder in reminders:
         user_id, server_id = reminder
@@ -334,6 +337,8 @@ async def check_reminders():
                     channel = server.get_channel(reminder_channel_id)
                     if channel:
                         await channel.send(f"Hey {member.mention}, don't forget to submit your journal today!")
+        else:
+            print("An entry was already given for reminder " + str(reminder))
 
 @check_reminders.before_loop
 async def before_check_reminders():
