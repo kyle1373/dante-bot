@@ -230,9 +230,9 @@ async def submit(ctx, *, arg=None):
     embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.avatar.url if ctx.author.avatar else discord.Embed.Empty)
 
     if streak_updated:
-        response = f"Thank you {ctx.author.display_name.split(' ')[0]} for submitting your journal. Your current streak is {new_streak}."
+        response = f"Thank you {ctx.author.display_name} for submitting your journal. Your current streak is {new_streak}."
     else:
-        response = f"Thank you for sending your journal, {ctx.author.display_name.split(' ')[0]}. You've already submitted one today, so your streak still stands at {new_streak}."
+        response = f"Thank you for sending your journal, {ctx.author.display_name}. You've already submitted one today, so your streak still stands at {new_streak}."
 
     await ctx.send(response, embed=embed)
 
