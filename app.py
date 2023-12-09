@@ -4,8 +4,11 @@ import pytz
 from datetime import datetime, timedelta, time
 from discord.ext import commands, tasks
 import os
-import asyncio
 import re
+import json
+import asyncio
+from datetime import datetime
+
 
 from dotenv import load_dotenv
 
@@ -36,6 +39,12 @@ with conn:
                         current_streak INTEGER DEFAULT 0,
                         highest_streak INTEGER DEFAULT 0,
                         last_submission_date TIMESTAMP,
+                        PRIMARY KEY (user_id, server_id)
+                    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS reminders (
+                        user_id TEXT NOT NULL,
+                        server_id TEXT NOT NULL,
+                        reminder_time TIME,
                         PRIMARY KEY (user_id, server_id)
                     )''')
 
@@ -119,7 +128,7 @@ def update_streak(user_id, server_id):
 @bot.event
 async def on_ready():
     print(f'{bot.user.name} has connected to Discord!')
-    daily_check.start()
+    check_reminders.start()
     print("Started reminder async")
     print(f'Commands: {[command.name for command in bot.commands]}')
 
@@ -135,11 +144,13 @@ async def on_command_error(ctx, error):
 @bot.command(name='help')
 async def help_command(ctx):
     help_text = (
-        "!submit [message]: Submit a daily journal entry.\n"
-        "!journals [number]: View your last [number] journal entries.\n"
-        "!removelatest: Remove your latest journal entry.\n"
+        "!submit [message]: Submit a daily journal.\n"
+        "!journals [number]: View your last [number] journals.\n"
+        "!removelatest: Remove your latest journal.\n"
         "!streak: View your current and highest streak achieved.\n"
-        "!setreminder [time]: Set the daily reminder time (e.g., '8:30PM'). Requires admin permissions.\n"
+        "!remindme [time]: Set a daily reminder time (e.g., '8:30PM').\n"
+        "!dontremindme: Remove your daily reminder.\n"
+        "!export: Export all your journals as a JSON file.\n"
     )
     await ctx.send(help_text)
 
@@ -158,19 +169,17 @@ async def history(ctx, number: str = None):
         entries = conn.execute('SELECT message, submission_time FROM journals WHERE user_id = ? AND server_id = ? ORDER BY submission_time DESC LIMIT ?', (user_id, server_id, number)).fetchall()
 
     if entries:
+        embed = discord.Embed(color=0x3498db)
+        embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.avatar.url if ctx.author.avatar else discord.Embed.Empty)
+        embed.set_footer(text=f"Showing your last {number} journals")
+
         for entry in entries:
-            # Use the submission time directly as it's already a datetime object
             la_submission_time = entry[1].astimezone(pacific_time) if entry[1] else None
-
-            embed = discord.Embed(description=entry[0], color=0x3498db)
-            embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.avatar.url if ctx.author.avatar else discord.Embed.Empty)
-            if la_submission_time:
-                embed.set_footer(text=la_submission_time.strftime("%A, %B %d %Y at %I:%M%p"))
-            await ctx.send(embed=embed)
+            embed.add_field(name=la_submission_time.strftime("%A, %B %d %Y at %I:%M%p"), value=entry[0], inline=False)
+        
+        await ctx.send(embed=embed)
     else:
-        await ctx.send("You have no journal entries.")
-
-
+        await ctx.send("You have no journals.")
 
 @bot.command(name='streak')
 async def streak(ctx):
@@ -192,22 +201,22 @@ async def removelatest(ctx):
     server_id = str(ctx.guild.id)
 
     with conn:
-        # First, select the ID of the latest journal entry
+        # First, select the ID of the latest journal
         cur = conn.execute('SELECT id FROM journals WHERE user_id = ? AND server_id = ? ORDER BY submission_time DESC LIMIT 1', (user_id, server_id))
         row = cur.fetchone()
 
         # If an entry exists, delete it
         if row:
             conn.execute('DELETE FROM journals WHERE id = ?', (row[0],))
-            await ctx.send("Your latest journal entry has been removed.")
+            await ctx.send("Your latest journal has been removed.")
         else:
-            await ctx.send("No journal entries to remove.")
+            await ctx.send("No journals to remove.")
 
 
 @bot.command(name='submit')
 async def submit(ctx, *, arg=None):
     if arg is None or arg.strip() == "":
-        await ctx.send("Please provide a journal entry to submit.")
+        await ctx.send("Please provide a journal to submit.")
         return
 
     user_id = str(ctx.author.id)
@@ -215,19 +224,20 @@ async def submit(ctx, *, arg=None):
     channel_id = str(ctx.channel.id)
     message = arg
 
-    # Save the journal entry
     add_journal_entry(user_id, server_id, channel_id, message)
-    # Update and get the new streak
     streak_updated, new_streak = update_streak(user_id, server_id)
+    embed = discord.Embed(description=message, color=0x3498db)
+    embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.avatar.url if ctx.author.avatar else discord.Embed.Empty)
 
     if streak_updated:
-        await ctx.send(f"Thank you {ctx.author.display_name} for sending your daily journal. Your daily journal streak is now {new_streak}.")
+        response = f"Thank you {ctx.author.display_name.split(' ')[0]} for submitting your journal. Your current streak is {new_streak}."
     else:
-        await ctx.send(f"Thank you for sending your journal entry, {ctx.author.display_name}. You've already submitted one today, so your streak still stands at {new_streak}.")
+        response = f"Thank you for sending your journal, {ctx.author.display_name.split(' ')[0]}. You've already submitted one today, so your streak still stands at {new_streak}."
 
-@bot.command(name='setreminder')
-@commands.has_permissions(administrator=True)  # Ensure only admins can use this command
-async def set_reminder(ctx, time_str: str):
+    await ctx.send(response, embed=embed)
+
+@bot.command(name='remindme')
+async def remindme(ctx, time_str: str):
     # Regular expression to parse the time input
     match = re.match(r'(\d{1,2}):(\d{2})([APM]{2})', time_str.upper())
     if not match:
@@ -237,64 +247,99 @@ async def set_reminder(ctx, time_str: str):
     hour, minute, meridiem = match.groups()
     hour, minute = int(hour), int(minute)
 
-    # Convert 12-hour time to 24-hour time
+    # Convert 12-hour time to 24-hour time for storing in the database
+    db_hour = hour
     if meridiem == 'AM' and hour == 12:
-        hour = 0
+        db_hour = 0
     elif meridiem == 'PM' and hour != 12:
-        hour += 12
+        db_hour += 12
 
     # Validate time
-    if not (0 <= hour < 24 and 0 <= minute < 60):
+    if not (0 <= db_hour < 24 and 0 <= minute < 60):
         await ctx.send("Invalid time. Please enter a valid time.")
         return
 
-    # Write the time to a file or store it in some other way
-    with open('config.txt', 'w') as file:
-        file.write(f'{hour}:{minute}')
-    await ctx.send(f'Homies reminder time set to {hour:02d}:{minute:02d} PDT.')
+    # Store reminder time in the database
+    user_id = str(ctx.author.id)
+    server_id = str(ctx.guild.id)
+    with conn:
+        conn.execute('REPLACE INTO reminders (user_id, server_id, reminder_time) VALUES (?, ?, ?)', 
+                     (user_id, server_id, f'{db_hour:02d}:{minute:02d}:00'))
 
-    # Restart the daily_check loop to update the time
-    daily_check.restart()
+    # Convert the time to a friendly format for the confirmation message
+    friendly_time = f'{hour}:{minute:02d} {meridiem}'
+    await ctx.send(f"You will be reminded to submit your journal daily at {friendly_time} PDT. To remove this reminder, enter the !dontremindme command.")
 
-# Scheduled tasks
-@tasks.loop(hours=24)
-async def daily_check():
-    hour, minute = read_reminder_time()
+@bot.command(name='dontremindme')
+async def dontremindme(ctx):
+    user_id = str(ctx.author.id)
+    server_id = str(ctx.guild.id)
+
+    with conn:
+        conn.execute('DELETE FROM reminders WHERE user_id = ? AND server_id = ?', (user_id, server_id))
+
+    await ctx.send("Your daily reminder has been removed.")
+
+@bot.command(name='export')
+async def export(ctx):
+    user_id = str(ctx.author.id)
+    server_id = str(ctx.guild.id)
+
+    with conn:
+        entries = conn.execute('SELECT message, submission_time FROM journals WHERE user_id = ? AND server_id = ?', (user_id, server_id)).fetchall()
+
+    if entries:
+        journal_data = [{'message': entry[0], 'submission_time': entry[1].strftime("%Y-%m-%d %H:%M:%S")} for entry in entries]
+        file_name = f'{ctx.author.id}_journals.json'
+        with open(file_name, 'w') as file:
+            json.dump(journal_data, file)
+
+        await ctx.send(file=discord.File(file_name))
+        os.remove(file_name)
+    else:
+        await ctx.send("You have no journals to export.")
+
+@tasks.loop(minutes=1)
+async def check_reminders():
     now = datetime.now(pytz.timezone('America/Los_Angeles'))
-    reminder_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    current_time = now.strftime("%H:%M:00")  # Format to match the time stored in the database
+    start_of_day_pacific = datetime.combine(now.date(), time.min).astimezone(pytz.timezone('America/Los_Angeles'))
+    end_of_day_pacific = datetime.combine(now.date(), time.max).astimezone(pytz.timezone('America/Los_Angeles'))
 
-    if now < reminder_time:
-        await asyncio.sleep((reminder_time - now).total_seconds())
+    # Convert to UTC for comparison with database entries
+    start_of_day_utc = start_of_day_pacific.astimezone(pytz.utc)
+    end_of_day_utc = end_of_day_pacific.astimezone(pytz.utc)
 
-    server_id = 816083336836939776  # Server to check
-    channel_id = 902831374506020874  # Channel to send message
-    channel = bot.get_channel(channel_id)
+    with conn:
+        # Fetch all reminders that match the current time
+        reminders = conn.execute('SELECT user_id, server_id FROM reminders WHERE reminder_time = ?', (current_time,)).fetchall()
 
-    if channel is None:
-        print("Channel not found")
-        return
+    for reminder in reminders:
+        user_id, server_id = reminder
+        server_id = int(server_id)
+        user_id = int(user_id)
 
-    date_to_check = now.date()
-    users_to_remind = await get_users_without_submission(server_id, date_to_check, reminder_time)
+        # Check if the user has already submitted a journal today
+        with conn:
+            entry_today = conn.execute('SELECT 1 FROM journals WHERE user_id = ? AND server_id = ? AND submission_time BETWEEN ? AND ?', (user_id, server_id, start_of_day_utc, end_of_day_utc)).fetchone()
 
-    if users_to_remind:
-        mentions = ' '.join([f'<@{user_id}>' for user_id in users_to_remind])
-        reminder_message = f"{mentions}\nMake sure you submit your journal entry before the end of the day!"
-        await channel.send(reminder_message)
-        print("Sent reminder message!")
-        print(reminder_message + "\n" + str(datetime.now(pytz.timezone('America/Los_Angeles'))) + "\n\n")
+        # If no entry submitted today, send a reminder
+        if not entry_today:
+            server = bot.get_guild(server_id)
+            if server:
+                member = server.get_member(user_id)
+                if member:
+                    # Define the channel ID where reminders are sent (hardcoded for now)
+                    reminder_channel_id = 902831374506020874 #1182855047143493772
+                    channel = server.get_channel(reminder_channel_id)
+                    if channel:
+                        await channel.send(f"Hey {member.mention}, don't forget to submit your journal today!")
 
-@daily_check.before_loop
-async def before_daily_check():
+@check_reminders.before_loop
+async def before_check_reminders():
+    print("Waiting for bot to be ready to start reminder checks...")
     await bot.wait_until_ready()
-    hour, minute = read_reminder_time()
-    now = datetime.now(pytz.timezone('America/Los_Angeles'))
-    first_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-
-    if now >= first_run:
-        first_run += timedelta(days=1)
-
-    await asyncio.sleep((first_run - now).total_seconds())
+    print("Starting reminder checks...")
 
 # Bot token and run
 bot_token = os.getenv('DISCORD_BOT_TOKEN')
