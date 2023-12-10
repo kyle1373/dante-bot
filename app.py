@@ -48,37 +48,6 @@ with conn:
                         PRIMARY KEY (user_id, server_id)
                     )''')
 
-# Helper functions
-def read_reminder_time():
-    try:
-        with open('config.txt', 'r') as file:
-            time_str = file.read().strip()
-            hour, minute = map(int, time_str.split(':'))
-            return hour, minute
-    except FileNotFoundError:
-        return 20, 0  # Default time if file not found
-
-async def get_users_without_submission(server_id, date):
-    pacific_time = pytz.timezone('America/Los_Angeles')
-    utc_time = pytz.utc
-
-    # Start and end of the day in Pacific Time
-    start_of_day_pacific = datetime.combine(date, time.min).astimezone(pacific_time)
-    end_of_day_pacific = datetime.combine(date, time.max).astimezone(pacific_time)
-
-    # Convert to UTC for comparison with database entries
-    start_of_day_utc = start_of_day_pacific.astimezone(utc_time)
-    end_of_day_utc = end_of_day_pacific.astimezone(utc_time)
-
-    # Get users with submission in the given date range
-    users_with_submission = {row[0] for row in conn.execute('SELECT DISTINCT user_id FROM journals WHERE server_id = ? AND submission_time BETWEEN ? AND ?', (server_id, start_of_day_utc, end_of_day_utc))}
-    
-    # Get all non-bot members of the server
-    all_members = {member.id for member in bot.get_guild(server_id).members if not member.bot}
-    
-    # Return users who haven't submitted
-    return all_members - users_with_submission
-
 # Database functions
 def add_journal_entry(user_id, server_id, channel_id, message):
     with conn:
@@ -247,28 +216,28 @@ async def remindme(ctx, time_str: str):
     hour, minute, meridiem = match.groups()
     hour, minute = int(hour), int(minute)
 
-    # Convert 12-hour time to 24-hour time for storing in the database
-    db_hour = hour
-    if meridiem == 'AM' and hour == 12:
-        db_hour = 0
-    elif meridiem == 'PM' and hour != 12:
-        db_hour += 12
+    # Convert 12-hour time to 24-hour time
+    if meridiem == 'PM' and hour != 12:
+        hour += 12
+    elif meridiem == 'AM' and hour == 12:
+        hour = 0
 
-    # Validate time
-    if not (0 <= db_hour < 24 and 0 <= minute < 60):
-        await ctx.send("Invalid time. Please enter a valid time.")
-        return
+    # Create a datetime object in PDT timezone
+    pacific_time = pytz.timezone('America/Los_Angeles')
+    now = datetime.now(pacific_time)
+    reminder_time_pdt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-    # Store reminder time in the database
+    # Convert reminder time to UTC
+    reminder_time_utc = reminder_time_pdt.astimezone(pytz.utc)
+
+    # Store reminder time in the database in UTC format
     user_id = str(ctx.author.id)
     server_id = str(ctx.guild.id)
     with conn:
         conn.execute('REPLACE INTO reminders (user_id, server_id, reminder_time) VALUES (?, ?, ?)', 
-                     (user_id, server_id, f'{db_hour:02d}:{minute:02d}:00'))
+                     (user_id, server_id, reminder_time_utc.strftime('%H:%M:%S')))
 
-    # Convert the time to a friendly format for the confirmation message
-    friendly_time = f'{hour}:{minute:02d} {meridiem}'
-    await ctx.send(f"You will be reminded to submit your journal daily at {friendly_time} PDT. To remove this reminder, enter the !dontremindme command.")
+    await ctx.send(f"You will be reminded to submit your journal daily at {time_str} PDT. To remove this reminder, enter the !dontremindme command.")
 
 @bot.command(name='dontremindme')
 async def dontremindme(ctx):
@@ -302,43 +271,55 @@ async def export(ctx):
 @tasks.loop(minutes=1)
 async def check_reminders():
     print("Checking reminders...")
-    now = datetime.now(pytz.timezone('America/Los_Angeles'))
-    current_time = now.strftime("%H:%M:00")  # Format to match the time stored in the database
-    start_of_day_pacific = datetime.combine(now.date(), time.min).astimezone(pytz.timezone('America/Los_Angeles'))
-    end_of_day_pacific = datetime.combine(now.date(), time.max).astimezone(pytz.timezone('America/Los_Angeles'))
-
-    # Convert to UTC for comparison with database entries
-    start_of_day_utc = start_of_day_pacific.astimezone(pytz.utc)
-    end_of_day_utc = end_of_day_pacific.astimezone(pytz.utc)
+    now_pacific = datetime.now(pytz.timezone('America/Los_Angeles'))
+    now_utc = now_pacific.astimezone(pytz.utc)
+    current_utc_time = now_utc.strftime("%H:%M:00")
 
     with conn:
-        # Fetch all reminders that match the current time
-        reminders = conn.execute('SELECT user_id, server_id FROM reminders WHERE reminder_time = ?', (current_time,)).fetchall()
+        # Fetch all reminders that match the current UTC time
+        reminders = conn.execute('SELECT user_id, server_id FROM reminders WHERE reminder_time = ?', (current_utc_time,)).fetchall()
+
     
-    print("Reminders at " + str(now) + ": " + str(reminders))    
+    print("Reminders at " + str(now_utc) + ": " + str(reminders))
 
     for reminder in reminders:
         user_id, server_id = reminder
-        server_id = int(server_id)
-        user_id = int(user_id)
+        server = bot.get_guild(int(server_id))
+        member = server.get_member(int(user_id)) if server else None
 
-        # Check if the user has already submitted a journal today
-        with conn:
-            entry_today = conn.execute('SELECT 1 FROM journals WHERE user_id = ? AND server_id = ? AND submission_time BETWEEN ? AND ?', (user_id, server_id, start_of_day_utc, end_of_day_utc)).fetchone()
+        if member:
+            do_remind = False
+            # Check if the user has already submitted a journal today in Los Angeles time
+            with conn:
+                last_entry = conn.execute('SELECT MAX(submission_time) FROM journals WHERE user_id = ? AND server_id = ?', (user_id, server_id)).fetchone()[0]
+                print("last_entry with " + str(reminder) + " is " + str(last_entry))
+                if last_entry:
+                    # Convert last_entry to a datetime object
+                    last_entry_datetime = datetime.strptime(last_entry, "%Y-%m-%d %H:%M:%S")
 
-        # If no entry submitted today, send a reminder
-        if not entry_today:
-            server = bot.get_guild(server_id)
-            if server:
-                member = server.get_member(user_id)
-                if member:
-                    # Define the channel ID where reminders are sent (hardcoded for now)
-                    reminder_channel_id = 902831374506020874 #1182855047143493772
-                    channel = server.get_channel(reminder_channel_id)
-                    if channel:
-                        await channel.send(f"Hey {member.mention}, don't forget to submit your journal today!")
-        else:
-            print("An entry was already given for reminder " + str(reminder))
+                    # Make last_entry_datetime offset-aware by setting it to UTC timezone
+                    last_entry_datetime = last_entry_datetime.replace(tzinfo=pytz.utc)
+
+                    # Determine the start of the current day in Pacific Time and convert it to UTC
+                    start_of_today_pacific = datetime.combine(now_pacific.date(), time(0, 0))
+                    start_of_today_utc = start_of_today_pacific.astimezone(pytz.utc)
+
+                    if last_entry_datetime < start_of_today_utc:
+                        do_remind = True
+                else:
+                    do_remind = True
+
+            print("do_remind with " + str(reminder) + " is " + str(do_remind))
+            if do_remind:
+                reminder_channel_id = 902831374506020874 # 1182855047143493772
+                channel = server.get_channel(reminder_channel_id)
+                if channel:
+                    await channel.send(f"Hey {member.mention}, don't forget to submit your journal today!")
+                    print("Sent reminder!")
+                else:
+                    print("Did not send reminder because channel does not exist")
+            print("")
+
 
 @check_reminders.before_loop
 async def before_check_reminders():
