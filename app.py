@@ -154,7 +154,7 @@ async def help_command(ctx):
     )
     await ctx.send(help_text)
 
-@bot.command(name='journals')
+@bot.command(name='journals', aliases=['journal', 'diary', 'diaries', 'entries', 'mydiary', 'myjournal', 'myentries', 'mydiaries', 'myjournals'])
 async def history(ctx, number: str = None):
     if number is None or not number.isdigit():
         number = 10
@@ -195,7 +195,8 @@ async def streak(ctx):
     else:
         await ctx.send("You don't have a streak yet.")
 
-@bot.command(name='removelatest')
+# here i preserve the compact keyword delete/del or remove/rem/rm due to possible future !delete [num] command
+@bot.command(name='removelatest', aliases=['pop', 'deletelast', 'deletelatest', 'removelast'])
 async def removelatest(ctx):
     user_id = str(ctx.author.id)
     server_id = str(ctx.guild.id)
@@ -213,7 +214,7 @@ async def removelatest(ctx):
             await ctx.send("No journals to remove.")
 
 
-@bot.command(name='submit')
+@bot.command(name='submit', aliases=['new', 'newjournal', 'daily', 'post'])
 async def submit(ctx, *, arg=None):
     if arg is None or arg.strip() == "":
         await ctx.send("Please provide a journal to submit.")
@@ -236,7 +237,7 @@ async def submit(ctx, *, arg=None):
 
     await ctx.send(response, embed=embed)
 
-@bot.command(name='remindme')
+@bot.command(name='remindme', aliases=['remind', 'ping', 'remindat', 'pingat', 'reminder'])
 async def remindme(ctx, time_str: str):
     # Regular expression to parse the time input
     match = re.match(r'(\d{1,2}):(\d{2})([APM]{2})', time_str.upper())
@@ -270,7 +271,7 @@ async def remindme(ctx, time_str: str):
     friendly_time = f'{hour}:{minute:02d} {meridiem}'
     await ctx.send(f"You will be reminded to submit your journal daily at {friendly_time} PDT. To remove this reminder, enter the !dontremindme command.")
 
-@bot.command(name='dontremindme')
+@bot.command(name='dontremindme', aliases=['dontremind', 'noremind', 'noreminder', 'noping'])
 async def dontremindme(ctx):
     user_id = str(ctx.author.id)
     server_id = str(ctx.guild.id)
