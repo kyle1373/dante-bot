@@ -8,17 +8,17 @@ import re
 import json
 import asyncio
 from datetime import datetime
-
-
 from dotenv import load_dotenv
 
 load_dotenv()  # take environment variables from .env.
 
-# Bot setup
+# Bot startup
 intents = discord.Intents.all()
 intents.messages = True
-
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
+
+# Configurations
+STREAK_TIME = time(14, 39)  # in PDT
 
 # Database connection
 conn = sqlite3.connect('journals.db', detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
@@ -55,44 +55,38 @@ def add_journal_entry(user_id, server_id, channel_id, message):
                      (user_id, server_id, channel_id, message))
 
 def update_streak(user_id, server_id):
+    pacific_time = pytz.timezone('America/Los_Angeles')
+    now_utc = datetime.now(pytz.utc)  # Current time in UTC
+    start_of_today_pacific = datetime.combine(now_utc.astimezone(pacific_time).date(), STREAK_TIME).astimezone(pytz.utc)
+
     with conn:
         cur = conn.execute('SELECT last_submission_date, current_streak, highest_streak FROM streaks WHERE user_id = ? AND server_id = ?', (user_id, server_id))
         row = cur.fetchone()
 
-        pacific_time = pytz.timezone('America/Los_Angeles')
-        now = datetime.now(pacific_time).date()  # Get only the date part
-        streak_updated = False  # Flag to indicate if the streak was updated
+        if row is None:
+            # Initialize streak data for new user
+            conn.execute('INSERT INTO streaks (user_id, server_id, current_streak, highest_streak, last_submission_date) VALUES (?, ?, ?, ?, ?)', 
+                         (user_id, server_id, 1, 1, now_utc))
+            return 1
 
-        if row and row[0] is not None:
-            last_submission_date_str = str(row[0])
-            last_submission_date = datetime.fromisoformat(last_submission_date_str).astimezone(pacific_time).date()
-            current_streak, highest_streak = row[1], row[2]
+        last_submission_date, current_streak, highest_streak = row
 
-            if last_submission_date == now - timedelta(days=1):
-                # If the last submission was yesterday, increment the streak
-                new_streak = current_streak + 1
-            elif last_submission_date < now - timedelta(days=1):
-                # If the last submission was before yesterday, reset the streak
-                new_streak = 1
-            else:
-                # If the last submission was today or in the future, don't update the streak
-                new_streak = current_streak
+        # Use last_submission_date as is, assuming it's already a datetime object
+        if not last_submission_date:
+            last_submission_date = datetime.min.replace(tzinfo=pytz.utc)
 
-            # Update highest streak if new streak is higher
-            if new_streak > highest_streak:
-                highest_streak = new_streak
+        # Update streak
+        if last_submission_date < start_of_today_pacific:
+            current_streak = current_streak + 1 if last_submission_date >= start_of_today_pacific - timedelta(days=1) else 1
+        highest_streak = max(highest_streak, current_streak)
 
-            # Update the database
-            conn.execute('UPDATE streaks SET last_submission_date = ?, current_streak = ?, highest_streak = ? WHERE user_id = ? AND server_id = ?', (datetime.now(), new_streak, highest_streak, user_id, server_id))
-            streak_updated = True
-        else:
-            # If there are no previous submissions, start the streak
-            new_streak = 1
-            highest_streak = 1
-            conn.execute('INSERT INTO streaks (user_id, server_id, last_submission_date, current_streak, highest_streak) VALUES (?, ?, ?, ?, ?)', (user_id, server_id, datetime.now(), new_streak, highest_streak))
-            streak_updated = True
+        # Update the streaks table
+        conn.execute('UPDATE streaks SET current_streak = ?, highest_streak = ?, last_submission_date = ? WHERE user_id = ? AND server_id = ?', 
+                     (current_streak, highest_streak, now_utc, user_id, server_id))
 
-        return streak_updated, new_streak
+    return current_streak
+
+
 
 @bot.event
 async def on_ready():
@@ -143,12 +137,15 @@ async def history(ctx, number: str = None):
         embed.set_footer(text=f"Showing your last {number} journals")
 
         for entry in entries:
-            la_submission_time = entry[1].astimezone(pacific_time) if entry[1] else None
-            embed.add_field(name=la_submission_time.strftime("%A, %B %d %Y at %I:%M%p"), value=entry[0], inline=False)
-        
+            utc_time = pytz.utc.localize(entry[1]) if entry[1] else None  # Ensure the datetime is UTC
+            la_submission_time = utc_time.astimezone(pacific_time) if utc_time else None
+            if la_submission_time:
+                embed.add_field(name=la_submission_time.strftime("%A, %B %d %Y at %I:%M%p"), value=entry[0], inline=False)
+
         await ctx.send(embed=embed)
     else:
         await ctx.send("You have no journals.")
+
 
 @bot.command(name='streak')
 async def streak(ctx):
@@ -194,14 +191,11 @@ async def submit(ctx, *, arg=None):
     message = arg
 
     add_journal_entry(user_id, server_id, channel_id, message)
-    streak_updated, new_streak = update_streak(user_id, server_id)
+    new_streak = update_streak(user_id, server_id)
     embed = discord.Embed(description=message, color=0x3498db)
     embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.avatar.url if ctx.author.avatar else discord.Embed.Empty)
 
-    if streak_updated:
-        response = f"Thank you {ctx.author.display_name} for submitting your journal. Your current streak is {new_streak}."
-    else:
-        response = f"Thank you for sending your journal, {ctx.author.display_name}. You've already submitted one today, so your streak still stands at {new_streak}."
+    response = f"Thank you {ctx.author.display_name} for submitting your journal. Your current streak is {new_streak}."
 
     await ctx.send(response, embed=embed)
 
@@ -275,11 +269,14 @@ async def check_reminders():
     now_utc = now_pacific.astimezone(pytz.utc)
     current_utc_time = now_utc.strftime("%H:%M:00")
 
+    start_of_today_pacific = datetime.combine(now_pacific.date(), STREAK_TIME)
+    if now_pacific.time() < STREAK_TIME:
+        start_of_today_pacific -= timedelta(days=1)  # Go back one day if current time is before 6 AM
+
     with conn:
         # Fetch all reminders that match the current UTC time
         reminders = conn.execute('SELECT user_id, server_id FROM reminders WHERE reminder_time = ?', (current_utc_time,)).fetchall()
 
-    
     print("Reminders at " + str(now_utc) + ": " + str(reminders))
 
     for reminder in reminders:
@@ -292,19 +289,15 @@ async def check_reminders():
             # Check if the user has already submitted a journal today in Los Angeles time
             with conn:
                 last_entry = conn.execute('SELECT MAX(submission_time) FROM journals WHERE user_id = ? AND server_id = ?', (user_id, server_id)).fetchone()[0]
-                print("last_entry with " + str(reminder) + " is " + str(last_entry))
                 if last_entry:
                     # Convert last_entry to a datetime object
                     last_entry_datetime = datetime.strptime(last_entry, "%Y-%m-%d %H:%M:%S")
-
-                    # Make last_entry_datetime offset-aware by setting it to UTC timezone
                     last_entry_datetime = last_entry_datetime.replace(tzinfo=pytz.utc)
 
-                    # Determine the start of the current day in Pacific Time and convert it to UTC
-                    start_of_today_pacific = datetime.combine(now_pacific.date(), time(0, 0))
-                    start_of_today_utc = start_of_today_pacific.astimezone(pytz.utc)
+                    # Convert last_entry_datetime to Pacific Time
+                    last_entry_datetime_pacific = last_entry_datetime.astimezone(pytz.timezone('America/Los_Angeles'))
 
-                    if last_entry_datetime < start_of_today_utc:
+                    if last_entry_datetime_pacific < start_of_today_pacific:
                         do_remind = True
                 else:
                     do_remind = True
