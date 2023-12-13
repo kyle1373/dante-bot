@@ -123,7 +123,7 @@ async def help_command(ctx):
     )
     await ctx.send(help_text)
 
-@bot.command(name='journals')
+@bot.command(name='journals', aliases=['journal', 'diary', 'diaries', 'entries', 'mydiary', 'myjournal', 'myentries', 'mydiaries', 'myjournals'])
 async def history(ctx, number: str = None):
     if number is None or not number.isdigit():
         number = 10
@@ -137,18 +137,52 @@ async def history(ctx, number: str = None):
     with conn:
         entries = conn.execute('SELECT message, submission_time FROM journals WHERE user_id = ? AND server_id = ? ORDER BY submission_time DESC LIMIT ?', (user_id, server_id, number)).fetchall()
 
-    if entries:
+    if not entries:
+        await ctx.send("You have no journals.")
+        return
+
+    entries_per_page = 1  # idk i feel like we can fit more than 1, should we let user modify it?
+    pages = [entries[i:i + entries_per_page] for i in range(0, len(entries), entries_per_page)]
+    current_page = 0
+
+    def create_embed(page_index):
         embed = discord.Embed(color=0x3498db)
         embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.avatar.url if ctx.author.avatar else discord.Embed.Empty)
-        embed.set_footer(text=f"Showing your last {number} journals")
+        for entry in pages[page_index]:
+            submission_time = entry[1].astimezone(pacific_time) if entry[1] else None
+            embed.add_field(name=submission_time.strftime("%A, %B %d %Y at %I:%M%p"), value=entry[0], inline=False)
+        embed.set_footer(text=f"Page {page_index + 1} of {len(pages)}")
+        return embed
 
-        for entry in entries:
-            la_submission_time = entry[1].astimezone(pacific_time) if entry[1] else None
-            embed.add_field(name=la_submission_time.strftime("%A, %B %d %Y at %I:%M%p"), value=entry[0], inline=False)
-        
-        await ctx.send(embed=embed)
-    else:
-        await ctx.send("You have no journals.")
+    # i wanted to use swords or like demons or something dante/devil may cry themed but idk
+    # placeholders for now
+    # can i set placeholder like so?
+    # placeholder = ⬅️
+    # it doesnt give me an error
+    
+    message = await ctx.send(embed=create_embed(current_page))
+    await message.add_reaction('⬅️')
+    await message.add_reaction('➡️')
+
+    def check(reaction, user):
+        return user == ctx.author and str(reaction.emoji) in ['⬅️', '➡️'] and reaction.message.id == message.id
+
+    while True:
+        try:
+            # good programming practice says i put a placehodler but in my opinion 90 secs is more than enough
+            reaction, user = await bot.wait_for('reaction_add', timeout=90.0, check=check)
+            await message.remove_reaction(reaction, user)
+
+            if str(reaction.emoji) == '➡️' and current_page < len(pages) - 1:
+                current_page += 1
+            elif str(reaction.emoji) == '⬅️' and current_page > 0:
+                current_page -= 1
+
+            await message.edit(embed=create_embed(current_page))
+
+        except asyncio.TimeoutError:
+            break
+    await message.clear_reactions()        
 
 @bot.command(name='streak')
 async def streak(ctx):
@@ -164,7 +198,8 @@ async def streak(ctx):
     else:
         await ctx.send("You don't have a streak yet.")
 
-@bot.command(name='removelatest')
+# here i preserve the compact keyword delete/del or remove/rem/rm due to possible future !delete [num] command
+@bot.command(name='removelatest', aliases=['pop', 'deletelast', 'deletelatest', 'removelast'])
 async def removelatest(ctx):
     user_id = str(ctx.author.id)
     server_id = str(ctx.guild.id)
@@ -182,7 +217,7 @@ async def removelatest(ctx):
             await ctx.send("No journals to remove.")
 
 
-@bot.command(name='submit')
+@bot.command(name='submit', aliases=['new', 'newjournal', 'daily', 'post'])
 async def submit(ctx, *, arg=None):
     if arg is None or arg.strip() == "":
         await ctx.send("Please provide a journal to submit.")
@@ -205,7 +240,7 @@ async def submit(ctx, *, arg=None):
 
     await ctx.send(response, embed=embed)
 
-@bot.command(name='remindme')
+@bot.command(name='remindme', aliases=['remind', 'ping', 'remindat', 'pingat', 'reminder'])
 async def remindme(ctx, time_str: str):
     # Regular expression to parse the time input
     match = re.match(r'(\d{1,2}):(\d{2})([APM]{2})', time_str.upper())
@@ -239,7 +274,7 @@ async def remindme(ctx, time_str: str):
 
     await ctx.send(f"You will be reminded to submit your journal daily at {time_str} PDT. To remove this reminder, enter the !dontremindme command.")
 
-@bot.command(name='dontremindme')
+@bot.command(name='dontremindme', aliases=['dontremind', 'noremind', 'noreminder', 'noping'])
 async def dontremindme(ctx):
     user_id = str(ctx.author.id)
     server_id = str(ctx.guild.id)
